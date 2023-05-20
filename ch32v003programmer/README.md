@@ -11,7 +11,7 @@ You can either use a ESP32-S2 [DevkitC](https://www.digikey.com/en/products/deta
 
 This is the ESP32-S2 programmer for [ch32v003fun](https://github.com/cnlohr/ch32v003fun)
 
-Also Lolin S2-Mini works with some additional circuit needed for unbrick function of minichlink. Soic-8 version of ch32v003 j4m6 can unbrick sometimes when using the PD4 as GPIO.
+Also Lolin S2-Mini works with some additional circuit needed for unbrick function of minichlink. Soic-8 version of ch32v003 j4m6 can brick and does not allow to program when using the PD4 as GPIO.
 
 * SWIO on GPIO6 
 * Power control line GPIO11 at 3.3V
