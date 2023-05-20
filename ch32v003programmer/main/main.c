@@ -8,11 +8,13 @@
 #include "esp_efuse_table.h" // or "esp_efuse_custom_table.h"
 #include "tinyusb.h"
 #include "tusb_hid_gamepad.h"
+#include "tusb_cdc_acm.h"
 #include "advanced_usb_control.h"
 #include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "soc/dedic_gpio_reg.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include "soc/soc.h"
 #include "soc/system_reg.h"
 #include "soc/usb_reg.h"
@@ -25,6 +27,12 @@
 #define SOC_DPORT_USB_BASE 0x60080000
 
 struct SandboxStruct * g_SandboxStruct;
+
+#define RX_BUF_SIZE 1024
+#define TXD_PIN (GPIO_NUM_17)
+#define RXD_PIN (GPIO_NUM_18)
+#define UART UART_NUM_1 
+static uint8_t buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1]; 
 
 uint16_t tud_hid_get_report_cb(uint8_t itf,
 							   uint8_t report_id,
@@ -66,6 +74,16 @@ void tud_hid_set_report_cb(uint8_t itf,
 	}
 }
 
+
+void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
+{ 
+    size_t rx_size = 0; 
+
+    if (tinyusb_cdcacm_read(itf, buf, CONFIG_TINYUSB_CDC_RX_BUFSIZE, &rx_size) == ESP_OK) {
+		uart_write_bytes(UART, buf, rx_size);
+    } 
+} 
+
 void esp_sleep_enable_timer_wakeup();
 
 volatile void * keep_symbols[] = { 0, uprintf, vTaskDelay, ulp_riscv_halt,
@@ -78,10 +96,53 @@ volatile void * keep_symbols[] = { 0, uprintf, vTaskDelay, ulp_riscv_halt,
 
 extern struct SandboxStruct sandbox_mode;
 
+static void rx_task(void *arg)
+{ 
+    uint8_t buf[1024];
+	const char hello[] = "Hello world from cdc\r\n"; 
+	bool status = true;
+
+    while (1) {
+		if(tud_cdc_n_connected(TINYUSB_CDC_ACM_0)) { 
+			if(status) {
+				tinyusb_cdcacm_write_queue(TINYUSB_CDC_ACM_0, (uint8_t*)hello, strlen(hello));
+				tinyusb_cdcacm_write_flush(TINYUSB_CDC_ACM_0, 0); 
+				status = false;
+			}
+
+			const int rx_size = uart_read_bytes(UART, buf, RX_BUF_SIZE, 100 / portTICK_RATE_MS);
+			uint8_t *ptr = buf;
+			if (rx_size > 0) {  
+				for(int i = 0; i < rx_size; i += CONFIG_TINYUSB_CDC_RX_BUFSIZE) {
+					int remainer = rx_size - i >= CONFIG_TINYUSB_CDC_RX_BUFSIZE ? CONFIG_TINYUSB_CDC_RX_BUFSIZE : rx_size - i;
+					ptr = buf + i;
+					tinyusb_cdcacm_write_queue(TINYUSB_CDC_ACM_0, ptr, remainer);
+					tinyusb_cdcacm_write_flush(TINYUSB_CDC_ACM_0, 0);
+				} 
+			}
+		} else {
+			status = true;
+			vTaskDelay(100);
+		}
+    } 
+}
+
 void app_main(void)
 {
 	printf("Hello world! Keep table at %p\n", &keep_symbols );
 
+	const uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+	uart_driver_install(UART, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_param_config(UART, &uart_config);
+    uart_set_pin(UART, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
 	g_SandboxStruct = &sandbox_mode;
 
@@ -92,12 +153,25 @@ void app_main(void)
 
     tinyusb_config_t tusb_cfg = {};
     tinyusb_driver_install(&tusb_cfg);
-        
+
+ 
 	printf("Minimum free heap size: %d bytes\n", (int)esp_get_minimum_free_heap_size());
 
 	void sandbox_main();
 
 	sandbox_main();
+ 
+	const tinyusb_config_cdcacm_t acm_cfg = {
+		.usb_dev = TINYUSB_USBDEV_0,
+		.cdc_port = TINYUSB_CDC_ACM_0,
+		.rx_unread_buf_sz = 64,
+		.callback_rx = &tinyusb_cdc_rx_callback,
+		.callback_rx_wanted_char = NULL,
+		.callback_line_state_changed = NULL,
+		.callback_line_coding_changed = NULL
+	};
+	tusb_cdc_acm_init(&acm_cfg);  
+	xTaskCreate(rx_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES-1, NULL); 
 
 	do
 	{
